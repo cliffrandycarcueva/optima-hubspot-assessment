@@ -1,0 +1,147 @@
+{
+  "id": "OptimaErrNotify1",
+  "name": "Optima Error Notification",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "a0000000-0000-4000-8000-000000000101",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Code node: \"Build Safe Summary\" (Run Once for All Items) in the error workflow.\n// Input: the Error Trigger item ({ execution: {...}, workflow: {...} } or { trigger: {...}, workflow }).\n// Output: a notification payload with no tokens, secrets, request bodies or customer emails.\nconst data = $input.first().json;\nconst execution = data.execution || {};\nconst failure = execution.error || (data.trigger && data.trigger.error) || {};\nconst scrub = (value, max) => String(value == null ? '' : value)\n  .replace(/Bearer\\s+[A-Za-z0-9._~+\\/=-]+/gi, 'Bearer [redacted]')\n  .replace(/\\bpat-[a-z0-9]{2,4}-[A-Za-z0-9-]+/gi, '[redacted-token]')\n  .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/g, '[redacted-email]')\n  .replace(/\\b[a-f0-9]{32,}\\b/gi, '[redacted-hex]')\n  .replace(/\\s+/g, ' ')\n  .trim()\n  .slice(0, max);\nconst httpCode = failure.httpCode || (failure.cause && failure.cause.status) || null;\nreturn [{\n  json: {\n    source: 'optima-n8n',\n    severity: 'error',\n    workflowName: scrub((data.workflow && data.workflow.name) || 'unknown workflow', 120),\n    workflowId: (data.workflow && data.workflow.id) || null,\n    executionId: execution.id || null,\n    executionUrl: execution.url || null,\n    mode: execution.mode || (data.trigger ? 'trigger' : null),\n    failedNode: scrub(execution.lastNodeExecuted || (failure.node && failure.node.name) || 'unknown', 120),\n    httpCode: httpCode ? String(httpCode).slice(0, 3) : null,\n    errorSummary: scrub(failure.message || 'Workflow failed without an error message', 300),\n    timestamp: new Date().toISOString(),\n  },\n}];\n"
+      },
+      "id": "a0000000-0000-4000-8000-000000000102",
+      "name": "Build Safe Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c102-0000-4000-8000-000000000000",
+              "leftValue": "={{ !!$env.OPTIMA_ALERT_WEBHOOK_URL }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a0000000-0000-4000-8000-000000000103",
+      "name": "Alert Destination Set?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        520,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.OPTIMA_ALERT_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "a0000000-0000-4000-8000-000000000104",
+      "name": "Send Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        780,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "errorMessage": "OPTIMA_ALERT_WEBHOOK_URL is not set in the n8n environment; the failure notification was not sent."
+      },
+      "id": "a0000000-0000-4000-8000-000000000105",
+      "name": "Alert Not Configured",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        780,
+        360
+      ]
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build Safe Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Safe Summary": {
+      "main": [
+        [
+          {
+            "node": "Alert Destination Set?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert Destination Set?": {
+      "main": [
+        [
+          {
+            "node": "Send Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alert Not Configured",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": []
+}

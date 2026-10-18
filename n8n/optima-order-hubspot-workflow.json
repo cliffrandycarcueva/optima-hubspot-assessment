@@ -1,0 +1,841 @@
+{
+  "id": "OptimaOrderSync1",
+  "name": "Optima Order to HubSpot",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "optima-order",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "a0000000-0000-4000-8000-000000000001",
+      "name": "Order Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        360
+      ],
+      "webhookId": "6f1c2b8e-4d3a-4c55-9e0f-0a7d3c1b2e41"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Code node: \"Verify Signature & Validate\" (mode: Run Once for All Items).\n// Mirrors the NestJS receiver: HMAC-SHA256 over the exact raw body bytes, header\n// \"X-Webhook-Signature: sha256=<64 lowercase hex>\", constant-time comparison, then validation.\n// Requires n8n env: NODE_FUNCTION_ALLOW_BUILTIN=crypto, N8N_BLOCK_ENV_ACCESS_IN_NODE=false.\nconst crypto = require('crypto');\n\nconst reject = (status, error) => [{ json: { valid: false, status, error } }];\nconst item = $input.first();\nconst headers = item.json.headers || {};\nconst secret = $env.OPTIMA_WEBHOOK_SECRET;\nif (!secret || !String(secret).trim()) {\n  // Misconfiguration is an operator problem, not a client one: fail loudly (error workflow).\n  throw new Error('OPTIMA_WEBHOOK_SECRET is not configured in the n8n environment');\n}\n\n// 1. Signature over the exact received bytes (Webhook node option \"Raw Body\").\nif (!item.binary || !item.binary.data) return reject(400, 'Request body is required');\nconst raw = await this.helpers.getBinaryDataBuffer(0, 'data');\nif (raw.length === 0 || raw.length > 100 * 1024) return reject(raw.length ? 413 : 400, raw.length ? 'Request body too large' : 'Request body is required');\nconst header = headers['x-webhook-signature'];\nif (typeof header !== 'string' || !/^sha256=[0-9a-f]{64}$/.test(header)) return reject(401, 'Invalid or missing signature');\nconst expected = crypto.createHmac('sha256', String(secret)).update(raw).digest();\nconst received = Buffer.from(header.slice(7), 'hex');\nif (received.length !== expected.length || !crypto.timingSafeEqual(received, expected)) return reject(401, 'Invalid or missing signature');\n\n// 2. Parse the same bytes that were signed (never a re-serialized copy).\nlet order;\ntry { order = JSON.parse(raw.toString('utf8')); } catch { return reject(400, 'Body must be valid JSON'); }\n\n// 3. Validate the order.created payload (same rules as the NestJS DTO, condensed).\nconst errors = [];\nconst isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);\nconst text = (v, max = 200) => typeof v === 'string' && v.trim().length > 0 && v.length <= max;\nconst money = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;\nconst isoWithZone = /^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?(Z|[+-]\\d{2}:\\d{2})$/;\nif (!isObj(order)) errors.push('body must be an object');\nelse {\n  if (order.event !== 'order.created') errors.push('event must be order.created');\n  if (!text(order.order_id)) errors.push('order_id is required');\n  if (typeof order.created_at !== 'string' || !isoWithZone.test(order.created_at) || Number.isNaN(Date.parse(order.created_at))) errors.push('created_at must be ISO 8601 with seconds and timezone');\n  const c = order.customer;\n  if (!isObj(c)) errors.push('customer is required');\n  else {\n    if (typeof c.email !== 'string' || c.email.length > 254 || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(c.email)) errors.push('customer.email must be a valid email');\n    if (!text(c.first_name, 100)) errors.push('customer.first_name is required');\n    if (!text(c.last_name, 100)) errors.push('customer.last_name is required');\n    if (c.phone !== undefined && !text(c.phone, 40)) errors.push('customer.phone must be a non-empty string when present');\n  }\n  if (!Array.isArray(order.items) || order.items.length < 1 || order.items.length > 1000) errors.push('items must contain 1-1000 entries');\n  else order.items.forEach((it, i) => {\n    if (!isObj(it) || !text(it.sku, 100) || !text(it.name, 200) || !Number.isSafeInteger(it.qty) || it.qty < 1 || !money(it.price)) errors.push('items[' + i + '] needs sku, name, qty (positive integer), price (>= 0)');\n  });\n  if (typeof order.currency !== 'string' || !/^[A-Z]{3}$/.test(order.currency)) errors.push('currency must be an uppercase ISO 4217 code');\n  if (!money(order.total)) errors.push('total must be a number >= 0');\n}\nif (errors.length) return reject(400, 'Invalid payload: ' + errors.slice(0, 5).join('; '));\n\n// 4. Non-secret HubSpot settings, same variable names as the NestJS .env.\nconst pipeline = $env.HUBSPOT_PIPELINE_ID || 'default';\nconst dealStage = $env.HUBSPOT_DEAL_STAGE_ID || 'appointmentscheduled';\nconst contactProperties = {\n  email: order.customer.email.toLowerCase(),\n  firstname: order.customer.first_name,\n  lastname: order.customer.last_name,\n  ...(order.customer.phone === undefined ? {} : { phone: order.customer.phone }),\n};\nreturn [{\n  json: {\n    valid: true,\n    orderId: order.order_id,\n    email: contactProperties.email,\n    contactProperties,\n    dealProperties: {\n      dealname: 'Order ' + order.order_id,\n      amount: String(order.total),\n      closedate: new Date(order.created_at).toISOString(),\n      pipeline,\n      dealstage: dealStage,\n      deal_currency_code: order.currency,\n      optima_order_id: order.order_id,\n    },\n  },\n}];\n"
+      },
+      "id": "a0000000-0000-4000-8000-000000000002",
+      "name": "Verify Signature & Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c2-0000-4000-8000-000000000000",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a0000000-0000-4000-8000-000000000003",
+      "name": "Valid Request?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        520,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: $json.error }) }}",
+        "options": {
+          "responseCode": "={{ $json.status }}"
+        }
+      },
+      "id": "a0000000-0000-4000-8000-000000000004",
+      "name": "Reject Request",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        780,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.OPTIMA_HUBSPOT_BASE_URL || 'https://api.hubapi.com') + '/crm/v3/objects/contacts/search' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filterGroups: [{ filters: [{ propertyName: 'email', operator: 'EQ', value: $('Verify Signature & Validate').first().json.email }] }], properties: ['email'], limit: 2 }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "a0000000-0000-4000-8000-000000000005",
+      "name": "Search Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        780,
+        180
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "OptimaHubSpotKey",
+          "name": "HubSpot Service Key (Optima)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c5-0000-4000-8000-000000000000",
+              "leftValue": "={{ ($json.results || []).length > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a0000000-0000-4000-8000-000000000006",
+      "name": "Contact Exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1040,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ ($env.OPTIMA_HUBSPOT_BASE_URL || 'https://api.hubapi.com') + '/crm/v3/objects/contacts/' + encodeURIComponent($json.results[0].id) }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: $('Verify Signature & Validate').first().json.contactProperties }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "a0000000-0000-4000-8000-000000000007",
+      "name": "Update Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1300,
+        0
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "OptimaHubSpotKey",
+          "name": "HubSpot Service Key (Optima)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.OPTIMA_HUBSPOT_BASE_URL || 'https://api.hubapi.com') + '/crm/v3/objects/contacts' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: $('Verify Signature & Validate').first().json.contactProperties }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "a0000000-0000-4000-8000-000000000008",
+      "name": "Create Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1300,
+        360
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "OptimaHubSpotKey",
+          "name": "HubSpot Service Key (Optima)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ ($env.OPTIMA_HUBSPOT_BASE_URL || 'https://api.hubapi.com') + '/crm/v3/objects/contacts/' + encodeURIComponent($('Verify Signature & Validate').first().json.email) + '?idProperty=email&properties=email' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "a0000000-0000-4000-8000-000000000009",
+      "name": "Find Contact After Conflict",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        540
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "OptimaHubSpotKey",
+          "name": "HubSpot Service Key (Optima)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "s9-0",
+              "name": "contactId",
+              "value": "={{ String($json.id) }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a0000000-0000-4000-8000-000000000010",
+      "name": "Contact Ready",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1820,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.OPTIMA_HUBSPOT_BASE_URL || 'https://api.hubapi.com') + '/crm/v3/objects/deals/search' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filterGroups: [{ filters: [{ propertyName: 'optima_order_id', operator: 'EQ', value: $('Verify Signature & Validate').first().json.orderId }] }], properties: ['optima_order_id'], limit: 2 }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "a0000000-0000-4000-8000-000000000011",
+      "name": "Search Deal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2080,
+        180
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "OptimaHubSpotKey",
+          "name": "HubSpot Service Key (Optima)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c11-0000-4000-8000-000000000000",
+              "leftValue": "={{ ($json.results || []).length > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a0000000-0000-4000-8000-000000000012",
+      "name": "Deal Exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2340,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "s12-0",
+              "name": "dealId",
+              "value": "={{ String($json.results[0].id) }}",
+              "type": "string"
+            },
+            {
+              "id": "s12-1",
+              "name": "dealReused",
+              "value": true,
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a0000000-0000-4000-8000-000000000013",
+      "name": "Existing Deal",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2600,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.OPTIMA_HUBSPOT_BASE_URL || 'https://api.hubapi.com') + '/crm/v3/objects/deals' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: $('Verify Signature & Validate').first().json.dealProperties }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "a0000000-0000-4000-8000-000000000014",
+      "name": "Create Deal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2600,
+        360
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "OptimaHubSpotKey",
+          "name": "HubSpot Service Key (Optima)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "s14-0",
+              "name": "dealId",
+              "value": "={{ String($json.id) }}",
+              "type": "string"
+            },
+            {
+              "id": "s14-1",
+              "name": "dealReused",
+              "value": false,
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a0000000-0000-4000-8000-000000000015",
+      "name": "New Deal",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2860,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ ($env.OPTIMA_HUBSPOT_BASE_URL || 'https://api.hubapi.com') + '/crm/v3/objects/deals/' + encodeURIComponent($('Verify Signature & Validate').first().json.orderId) + '?idProperty=optima_order_id&properties=optima_order_id' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "a0000000-0000-4000-8000-000000000016",
+      "name": "Find Deal After Conflict",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2860,
+        540
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "OptimaHubSpotKey",
+          "name": "HubSpot Service Key (Optima)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "s16-0",
+              "name": "dealId",
+              "value": "={{ String($json.id) }}",
+              "type": "string"
+            },
+            {
+              "id": "s16-1",
+              "name": "dealReused",
+              "value": true,
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a0000000-0000-4000-8000-000000000017",
+      "name": "Recovered Deal",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3120,
+        540
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "a0000000-0000-4000-8000-000000000018",
+      "name": "Deal Ready",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        3380,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ ($env.OPTIMA_HUBSPOT_BASE_URL || 'https://api.hubapi.com') + '/crm/v4/objects/deals/' + encodeURIComponent($json.dealId) + '/associations/default/contacts/' + encodeURIComponent($('Contact Ready').first().json.contactId) }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "a0000000-0000-4000-8000-000000000019",
+      "name": "Associate Deal with Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3640,
+        180
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "OptimaHubSpotKey",
+          "name": "HubSpot Service Key (Optima)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ ($env.OPTIMA_HUBSPOT_BASE_URL || 'https://api.hubapi.com') + '/crm/v4/objects/deals/' + encodeURIComponent($('Deal Ready').first().json.dealId) + '/associations/contacts?limit=500' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "a0000000-0000-4000-8000-000000000020",
+      "name": "Read Deal Associations",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3900,
+        180
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "OptimaHubSpotKey",
+          "name": "HubSpot Service Key (Optima)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Code node: \"Confirm Association\" (Run Once for All Items).\n// The write response alone is not proof: read the Deal's Contact associations back.\nconst contactId = String($('Contact Ready').first().json.contactId);\nconst deal = $('Deal Ready').first().json;\nconst order = $('Verify Signature & Validate').first().json;\nconst results = $input.first().json.results || [];\nif (!results.some((r) => String(r.toObjectId) === contactId)) {\n  throw new Error('association_not_verified: Deal ' + deal.dealId + ' is not linked to Contact ' + contactId);\n}\nreturn [{\n  json: {\n    order_id: order.orderId,\n    result: 'synced',\n    contactId,\n    dealId: String(deal.dealId),\n    dealReused: deal.dealReused === true,\n  },\n}];\n"
+      },
+      "id": "a0000000-0000-4000-8000-000000000021",
+      "name": "Confirm Association",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4160,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "a0000000-0000-4000-8000-000000000022",
+      "name": "Respond Synced",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        4420,
+        180
+      ]
+    }
+  ],
+  "connections": {
+    "Order Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify Signature & Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Signature & Validate": {
+      "main": [
+        [
+          {
+            "node": "Valid Request?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid Request?": {
+      "main": [
+        [
+          {
+            "node": "Search Contact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Contact": {
+      "main": [
+        [
+          {
+            "node": "Contact Exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contact Exists?": {
+      "main": [
+        [
+          {
+            "node": "Update Contact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Contact": {
+      "main": [
+        [
+          {
+            "node": "Contact Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Contact": {
+      "main": [
+        [
+          {
+            "node": "Contact Ready",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Find Contact After Conflict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Contact After Conflict": {
+      "main": [
+        [
+          {
+            "node": "Contact Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contact Ready": {
+      "main": [
+        [
+          {
+            "node": "Search Deal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Deal": {
+      "main": [
+        [
+          {
+            "node": "Deal Exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deal Exists?": {
+      "main": [
+        [
+          {
+            "node": "Existing Deal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Deal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Existing Deal": {
+      "main": [
+        [
+          {
+            "node": "Deal Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Deal": {
+      "main": [
+        [
+          {
+            "node": "New Deal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Find Deal After Conflict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New Deal": {
+      "main": [
+        [
+          {
+            "node": "Deal Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Deal After Conflict": {
+      "main": [
+        [
+          {
+            "node": "Recovered Deal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recovered Deal": {
+      "main": [
+        [
+          {
+            "node": "Deal Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deal Ready": {
+      "main": [
+        [
+          {
+            "node": "Associate Deal with Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Associate Deal with Contact": {
+      "main": [
+        [
+          {
+            "node": "Read Deal Associations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Deal Associations": {
+      "main": [
+        [
+          {
+            "node": "Confirm Association",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confirm Association": {
+      "main": [
+        [
+          {
+            "node": "Respond Synced",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "OptimaErrNotify1",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {},
+  "tags": []
+}

@@ -4,7 +4,9 @@ A NestJS service accepts signed `order.created` webhooks from an online store, s
 
 A standalone C#/.NET 10 console app exports every HubSpot Deal created in the last 7 days to CSV for the accounting team ([details](#milestone-7--hubspot-deals-csv-exporter)).
 
-Not yet implemented (later milestones): the n8n workflow, Docker Compose, and deployment.
+As a bonus, the same webhook-to-HubSpot flow is rebuilt as importable **n8n workflows**, with an error-notification workflow ([n8n/README.md](n8n/README.md)).
+
+Not yet implemented: Docker Compose and deployment.
 
 ## Current status
 
@@ -16,6 +18,7 @@ Not yet implemented (later milestones): the n8n workflow, Docker Compose, and de
 | Dashboard: latest 50 attempts, status badges, HubSpot links, error details, manual Retry | Done |
 | Automatic retry/backoff for 429/5xx/network errors (requirement 25) | Done: in-request HTTP retries plus durable order-level retries ([details](#automatic-retries)) |
 | C# CSV export of the last 7 days of Deals (requirement 28) | Done; live read-only export verified |
+| Bonus: n8n workflow + error notification workflow | Done; tested in n8n 2.43.7 against a mock and one live synthetic order ([n8n/README.md](n8n/README.md)) |
 
 The sample order `ORD-WEBHOOK-DEMO-20261018` is `synced`. Its history keeps one failed attempt, from before the HubSpot unique property existed, and one succeeded attempt. Because the order is synced, the dashboard shows "Up to date" instead of a Retry button.
 
@@ -55,6 +58,7 @@ optima-hubspot-assessment/
     ui/dashboard.spec.ts           # Playwright
   tools/mock-webhook/send-order.mjs  # signed sample webhook sender
   tools/hubspot-deals-exporter/      # C# (.NET 10) Deals CSV exporter: src/, tests/, global.json, output/ (git-ignored)
+  n8n/                               # bonus: n8n workflow JSON (main + error), start script, mock HubSpot tests
   artifacts/                         # screenshots written by the browser tests
 ```
 
@@ -538,6 +542,28 @@ The 101 tests run in about a second and never call HubSpot. They use a scripted 
 - **Fixed window:** it is always 7 days, as the brief requires. There is no option for other ranges.
 - **No npm script:** there is no root npm script. This machine's default `dotnet` on PATH is an older SDK, so a wrapper wouldn't work reliably until .NET 10 is installed system-wide.
 
+## Bonus — n8n workflows
+
+[`n8n/`](n8n/) contains two importable workflows that rebuild requirements 22–24 in n8n. They run independently of the NestJS service, which is not replaced.
+
+- [`optima-order-hubspot-workflow.json`](n8n/optima-order-hubspot-workflow.json):
+  - signed webhook, with HMAC-SHA256 over the raw body and a timing-safe comparison;
+  - payload validation;
+  - Contact search, then update or create;
+  - Deal search, then create or reuse, using the unique `optima_order_id`;
+  - Deal↔Contact association, read back to verify it;
+  - a JSON response with `contactId`, `dealId` and `dealReused`.
+- [`optima-error-notification-workflow.json`](n8n/optima-error-notification-workflow.json): an Error Trigger that sends a sanitized alert to a configurable incoming-webhook URL. It reports the workflow, execution ID, failed node, HTTP code, a safe summary and a timestamp.
+
+**Credentials:** the HubSpot token is an n8n credential, and the webhook secret and alert URL are environment variables, so the JSON contains no secrets.
+
+**Tested with n8n 2.43.7:**
+- 11 scenarios against a local mock HubSpot (429/5xx/401, ambiguous creates, concurrent deliveries, error alert);
+- one live synthetic order sent twice, which produced a single Deal;
+- an export and re-import round trip.
+
+Setup, credentials, testing and limitations: [n8n/README.md](n8n/README.md).
+
 ## Security considerations
 
 - HubSpot and PostgreSQL credentials and `WEBHOOK_SECRET` are loaded only by NestJS and never sent to Next.js or the browser.
@@ -581,7 +607,8 @@ This setup suits a local take-home assessment, not production:
 | 27 | Dashboard: last 50 attempts, status, Retry for failed | ✅ |
 | 28 | Python/PHP/C# CSV export of the last 7 days of Deals | ✅ C# / .NET 10 exporter, 101 tests, live export verified |
 | 29 | README: setup, architecture, assumptions, improvements | ✅ (to be finalized at submission) |
-| Bonus | Automated tests | ✅ 110 backend tests + 7 Playwright browser tests + 101 C# exporter tests |
+| Bonus | Automated tests | ✅ 110 backend tests + 7 Playwright browser tests + 101 C# exporter tests + 11 n8n workflow scenarios |
+| Bonus | n8n workflow (requirements 22–24) with an error workflow that notifies on failure | ✅ [n8n/](n8n/) |
 
 ## Assumptions
 
