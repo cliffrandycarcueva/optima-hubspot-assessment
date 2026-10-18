@@ -1,0 +1,58 @@
+{
+  "name": "optima-hubspot-assessment",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typeorm": "typeorm-ts-node-commonjs",
+    "migration:generate": "typeorm-ts-node-commonjs migration:generate -d apps/api/src/database/data-source.ts",
+    "migration:run": "npm run build && typeorm migration:run -d dist/database/data-source.js",
+    "migration:show": "npm run build && typeorm migration:show -d dist/database/data-source.js",
+    "migration:revert": "npm run build && typeorm migration:revert -d dist/database/data-source.js",
+    "db:verify": "npm run build && node dist/database/verify.js",
+    "test:database": "npm run build && node --test tests/database.test.cjs",
+    "start": "node dist/main.js",
+    "dev": "npm run build && node dist/main.js",
+    "webhook:send": "node tools/mock-webhook/send-order.mjs",
+    "test:webhooks": "npm run build && node --test tests/webhooks.test.cjs",
+    "test": "npm run build && node --test tests/*.test.cjs",
+    "sync:order": "npm run build && node dist/sync/sync-order.js",
+    "hubspot:check": "npm run build && node dist/hubspot/check.js",
+    "test:sync": "npm run build && node --test tests/sync.test.cjs",
+    "sync:verify": "npm run build && node dist/sync/verify-sync.js",
+    "dev:api": "npm run build && concurrently --kill-others --names compiler,server \"tsc -p tsconfig.json --watch --preserveWatchOutput\" \"node --watch dist/main.js\"",
+    "dev:dashboard": "npm run dev --workspace @optima/dashboard",
+    "build:dashboard": "npm run build --workspace @optima/dashboard",
+    "start:dashboard": "npm run start --workspace @optima/dashboard",
+    "lint": "npm run lint --workspace @optima/dashboard",
+    "typecheck": "npm run build && npm run typecheck --workspace @optima/dashboard",
+    "dev:all": "concurrently --kill-others-on-fail --names api,dashboard \"npm:dev:api\" \"npm:dev:dashboard\"",
+    "test:dashboard": "npm run build && node --test tests/dashboard.test.cjs",
+    "test:ui": "playwright test"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.2.7",
+    "@nestjs/core": "^11.2.7",
+    "@nestjs/platform-express": "^11.2.7",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.4",
+    "dotenv": "^16.6.1",
+    "express": "^5.3.0",
+    "pg": "^8.16.3",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "typeorm": "~0.3.28"
+  },
+  "devDependencies": {
+    "@nestjs/testing": "^11.2.7",
+    "@playwright/test": "^1.64.1",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.0.0",
+    "concurrently": "^10.0.6",
+    "ts-node": "^10.9.2",
+    "typescript": "~5.9.3"
+  },
+  "workspaces": [
+    "apps/dashboard"
+  ]
+}

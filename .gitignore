@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+*.log
+.next/
+*.tsbuildinfo
+playwright-report/
+test-results/
+# C# Deals exporter build output and generated CSVs (may contain CRM data)
+tools/hubspot-deals-exporter/**/bin/
+tools/hubspot-deals-exporter/**/obj/
+tools/hubspot-deals-exporter/**/TestResults/
+tools/hubspot-deals-exporter/output/
+hubspot-deals-*.csv
+# Personal AI handoff notes (not part of the submission)
